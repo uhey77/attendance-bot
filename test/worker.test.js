@@ -1,0 +1,117 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { createHmac } from 'node:crypto';
+import worker, { AttendanceStore } from '../src/worker.js';
+
+class Storage {
+  data = new Map(); alarm = null;
+  async get(k) { return structuredClone(this.data.get(k)); }
+  async put(k,v) { this.data.set(k,structuredClone(v)); }
+  async delete(k) { return this.data.delete(k); }
+  async list({prefix,limit=Infinity}) { return new Map([...this.data].filter(([k])=>k.startsWith(prefix)).slice(0,limit).map(([k,v])=>[k,structuredClone(v)])); }
+  async getAlarm() { return this.alarm; }
+  async setAlarm(t) { this.alarm=t; }
+  async deleteAlarm() { this.alarm=null; }
+  async transaction(fn) { const old=structuredClone(this.data),alarm=this.alarm; try{return await fn(this);}catch(e){this.data=old;this.alarm=alarm;throw e;} }
+}
+function fixture() {
+  const storage=new Storage(); let serial=Promise.resolve();
+  const ctx={storage,blockConcurrencyWhile(fn){const next=serial.then(fn);serial=next.catch(()=>{});return next;}};
+  const env={GAS_SHARED_SECRET:'test-only',GAS_URL:'https://script.google.com/macros/s/test/exec'};
+  const actor=new AttendanceStore(ctx,env);
+  const command=(command,id)=>actor.fetch(new Request('https://internal/command',{method:'POST',body:JSON.stringify({command,requestId:id})})).then(r=>r.json());
+  return {storage,actor,command};
+}
+
+test('同時開始を直列化し、終了の再送でも記録と反映待ちを重複させない',async()=>{
+  const f=fixture();
+  const [a,b]=await Promise.all([f.command('/start','1'),f.command('/start','2')]);
+  assert.match(a.text,/開始しました/); assert.match(b.text,/^すでに作業中です。/);
+  const first=await f.command('/end','3');
+  assert.deepEqual(await f.command('/end','3'),first);
+  assert.equal((await f.storage.list({prefix:'record:'})).size,1);
+  assert.equal((await f.storage.list({prefix:'outbox:'})).size,1);
+  assert.ok(f.storage.alarm);
+  assert.match((await f.command('/week','4')).text,/反映待ち/);
+});
+
+test('Sheets失敗時に保存を維持し、次の再試行成功で反映待ちのみ消す',async(t)=>{
+  const f=fixture();await f.command('/start','1');await f.command('/end','2');
+  const stub=t.mock.method(globalThis,'fetch',async()=>Response.json({ok:false}));
+  await f.actor.alarm();
+  assert.equal((await f.storage.list({prefix:'outbox:'})).size,1);
+  assert.ok(f.storage.alarm>Date.now());
+  stub.mock.mockImplementation(async(_url,options)=>{
+    const envelope=JSON.parse(options.body);
+    assert.equal(envelope.signature,createHmac('sha256','test-only').update(`${envelope.timestamp}.${envelope.payload}`).digest('hex'));
+    return Response.json({ok:true});
+  });
+  await f.actor.alarm();
+  assert.equal((await f.storage.list({prefix:'outbox:'})).size,0);
+  assert.equal((await f.storage.list({prefix:'record:'})).size,1);
+  assert.ok(f.storage.alarm); // Slack posting still pending without its configuration.
+});
+
+test('再起動しても勤務状態と再送防止を保持する',async()=>{
+  const f=fixture();await f.command('/start','a');
+  const restarted=new AttendanceStore({storage:f.storage,blockConcurrencyWhile:fn=>fn()},{});
+  const request=()=>new Request('https://internal/command',{method:'POST',body:JSON.stringify({command:'/start',requestId:'a'})});
+  assert.match((await (await restarted.fetch(request())).json()).text,/開始しました/);
+  assert.ok(await f.storage.get('active'));
+});
+
+test('公開受付は署名・本人・6コマンドを検証してから保存処理を呼ぶ',async()=>{
+  let calls=0;
+  const env={SLACK_SIGNING_SECRET:'secret',ALLOWED_USER_ID:'U1',ALLOWED_TEAM_ID:'T1',GAS_URL:'url',GAS_SHARED_SECRET:'key',SLACK_BOT_TOKEN:'test',POST_CHANNEL_ID:'C1',MENTION_USER_ID:'U2',ATTENDANCE:{idFromName:v=>v,get:()=>({fetch:async()=>{calls++;return Response.json({ok:true});}})}};
+  function req(user='U1',command='/start',sign=true){
+    const body=new URLSearchParams({user_id:user,team_id:'T1',command,trigger_id:'123'}).toString();
+    const ts=String(Math.floor(Date.now()/1000));
+    return new Request('https://example.com/slack/commands',{method:'POST',headers:{'content-type':'application/x-www-form-urlencoded','x-slack-request-timestamp':ts,'x-slack-signature':sign?'v0='+createHmac('sha256','secret').update(`v0:${ts}:${body}`).digest('hex'):'bad'},body});
+  }
+  assert.equal((await worker.fetch(req('U1','/start',false),env)).status,401);
+  assert.match((await (await worker.fetch(req('U2'),env)).json()).text,/利用できません/);
+  assert.match((await (await worker.fetch(req('U1','/today'),env)).json()).text,/不明/);
+  assert.equal(calls,0);
+  assert.equal((await worker.fetch(req(),env)).status,200);assert.equal(calls,1);
+  assert.equal((await worker.fetch(req(),{})).status,503);
+});
+
+test('勤務ごとに親投稿を作り、開始だけメンションし、返信を順番に同じスレッドへ送る',async(t)=>{
+ const f=fixture();Object.assign(f.actor.env,{SLACK_BOT_TOKEN:'test',POST_CHANNEL_ID:'C123',MENTION_USER_ID:'U123'});
+ const sent=[];
+ t.mock.method(globalThis,'fetch',async(url,options)=>{
+   if(String(url).includes('script.google.com'))return Response.json({ok:true});
+   sent.push(JSON.parse(options.body));return Response.json({ok:true,ts:String(sent.length)+'.000001'});
+ });
+ for(const [i,c] of ['/start','/break','/resume','/end','/start'].entries())await f.command(c,String(i));
+ await f.command('/start','4'); // exact retry
+ for(let i=0;i<5;i++)await f.actor.alarm();
+ assert.equal(sent.length,5);
+ assert.equal(sent[0].thread_ts,undefined);assert.match(sent[0].text,/^<@U123>/);
+ for(const msg of sent.slice(1,4)){assert.equal(msg.thread_ts,'1.000001');assert.ok(!msg.text.includes('<@'));assert.equal(msg.channel,'C123');}
+ assert.equal(sent[4].thread_ts,undefined);assert.match(sent[4].text,/^<@U123>/);
+});
+
+test('Slack投稿の結果が不明な場合、再送してメンションを重複させない',async(t)=>{
+ const f=fixture();Object.assign(f.actor.env,{SLACK_BOT_TOKEN:'test',POST_CHANNEL_ID:'C123',MENTION_USER_ID:'U123'});
+ let calls=0;t.mock.method(globalThis,'fetch',async()=>{calls++;throw new Error('Network disconnected');});
+ await f.command('/start','a');await f.actor.alarm();await f.actor.alarm();
+ assert.equal(calls,1);assert.equal([...(await f.storage.list({prefix:'slack:'})).values()][0].status,'uncertain');
+ assert.ok(await f.storage.get('active'));
+});
+
+
+test('承認済みの手動記録は本人の保存領域だけに一度追加する', async () => {
+  const { applyManualRecords } = await import('../src/manual-records.js');
+  const storage = new Storage();
+  await applyManualRecords(storage, {});
+  assert.equal(storage.data.size, 0);
+  const env = { ALLOWED_TEAM_ID: 'T00000000', ALLOWED_USER_ID: 'U00000001' };
+  await storage.put('active', { id: 'ongoing' });
+  await storage.transaction(tx => applyManualRecords(tx, env));
+  await storage.transaction(tx => applyManualRecords(tx, env));
+  assert.equal((await storage.list({ prefix: 'record:' })).size, 1);
+  assert.equal((await storage.get('record:manual-20260927-20m46s-01')).durationMs, 1246000);
+  assert.deepEqual(await storage.get('active'), { id: 'ongoing' });
+  assert.equal((await storage.list({ prefix: 'slack:' })).size, 0);
+});

@@ -1,0 +1,35 @@
+{
+  "name": "tut-personal-attendance",
+  "main": "src/worker.js",
+  "compatibility_date": "2026-09-27",
+  "compatibility_flags": [
+    "nodejs_compat"
+  ],
+  "workers_dev": true,
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "ATTENDANCE",
+        "class_name": "AttendanceStore"
+      }
+    ]
+  },
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": [
+        "AttendanceStore"
+      ]
+    }
+  ],
+  "observability": {
+    "enabled": true,
+    "head_sampling_rate": 1
+  },
+  "vars": {
+    "ALLOWED_TEAM_ID": "T00000000",
+    "POST_CHANNEL_ID": "C00000000",
+    "ALLOWED_USER_ID": "U00000001",
+    "MENTION_USER_ID": "U00000002"
+  }
+}
