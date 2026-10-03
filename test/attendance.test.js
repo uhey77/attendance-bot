@@ -105,9 +105,11 @@ test('月給は動作確認を除外し月合計を一度だけ四捨五入す�
   const testRecord = { ...manual, id: '12147896323831.9593658818245.8577e9e1646c8b8c31a03017103e6e08' };
   const state = { active: null, records: [manual, testRecord] };
   const result = execute(state, { command: '/month', now: at('2026-09-28T01:00:00'), requestId: 'payroll' });
+  assert.match(result.text, /2026年9月の給与対象実働/);
   assert.match(result.text, /20分46秒/);
   assert.match(result.text, /346円/);
   assert.equal(result.state.records.length, 2);
   const nextMonth = execute(state, { command: '/month', now: at('2026-10-01T00:00:00'), requestId: 'next' });
+  assert.match(nextMonth.text, /2026年10月の給与対象実働/);
   assert.match(nextMonth.text, /合計給与：0円/);
 });
