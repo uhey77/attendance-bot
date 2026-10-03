@@ -98,3 +98,20 @@ export function sheetRow(record) {
   return [local(record.startedAt).slice(0, 10).replaceAll('-', '/'), local(record.startedAt),
     local(record.endedAt), (record.endedAt - record.startedAt - work) / MINUTE, work / MINUTE];
 }
+
+// 月初の定期投稿用：前月（日本時間）の開始日に属する終了済み勤務の給与を集計する。
+export function previousMonthPayroll(records, now) {
+  const date = new Date(now + JST);
+  const year = date.getUTCFullYear(), month = date.getUTCMonth();
+  const start = Date.UTC(year, month - 1, 1) - JST;
+  const end = Date.UTC(year, month, 1) - JST;
+  const duration = records.reduce((sum, record) => {
+    if (PAYROLL_EXCLUDED_IDS.has(record.id)) return sum;
+    const startedAt = record.kind === 'manual' ? Date.parse(record.workDate + 'T00:00:00+09:00') : record.startedAt;
+    return startedAt >= start && startedAt < end ? sum + workMilliseconds(record) : sum;
+  }, 0);
+  const target = new Date(start + JST);
+  const key = `${target.getUTCFullYear()}-${String(target.getUTCMonth() + 1).padStart(2, '0')}`;
+  const label = `${target.getUTCFullYear()}年${target.getUTCMonth() + 1}月`;
+  return { key, duration, text: `💴 ${label}分の給与\n給与対象実働：${exactDuration(duration)}\n時給：${HOURLY_RATE.toLocaleString('ja-JP')}円\n合計給与：${wages(duration).toLocaleString('ja-JP')}円` };
+}

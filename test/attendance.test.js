@@ -113,3 +113,17 @@ test('月給は動作確認を除外し月合計を一度だけ四捨五入す�
   assert.match(nextMonth.text, /2026年10月の給与対象実働/);
   assert.match(nextMonth.text, /合計給与：0円/);
 });
+
+test('月初の給与投稿は前月の開始日に属する終了済み勤務だけを集計する', async () => {
+  const { previousMonthPayroll } = await import('../src/attendance.js');
+  const s = session();
+  s.run('/start', '2026-08-31T23:00:00'); s.run('/end', '2026-09-01T01:00:00'); // 8月扱い
+  s.run('/start', '2026-09-30T23:30:00'); s.run('/end', '2026-10-01T00:30:00'); // 9月扱い：1時間
+  s.run('/start', '2026-10-01T00:30:00'); s.run('/end', '2026-10-01T01:00:00'); // 10月扱い
+  const records = [...s.state.records, { id: 'm', kind: 'manual', workDate: '2026-09-27', durationMs: 1246000 }];
+  const report = previousMonthPayroll(records, at('2026-10-01T09:00:00'));
+  assert.equal(report.key, '2026-09');
+  assert.equal(report.duration, 3_600_000 + 1246000);
+  assert.equal(report.text, '💴 2026年9月分の給与\n給与対象実働：1時間20分46秒\n時給：1,000円\n合計給与：1,346円');
+  assert.equal(previousMonthPayroll([], at('2027-01-01T09:00:00')).key, '2026-12');
+});
