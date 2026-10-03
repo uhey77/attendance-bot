@@ -99,17 +99,17 @@ test('時刻不明の手動記録は秒精度で開始日の週・月に集計�
 
 test('月給は動作確認を除外し月合計を一度だけ四捨五入する', async () => {
   const { wages } = await import('../src/payroll.js');
-  assert.equal(wages(1246000), 346);
-  assert.equal(wages(1200), 1);
+  assert.equal(wages(1246000, 1000), 346);
+  assert.equal(wages(1800, 1000), 1);
   const manual = { id: 'real', kind: 'manual', workDate: '2026-09-27', durationMs: 1246000 };
   const testRecord = { ...manual, id: '12147896323831.9593658818245.8577e9e1646c8b8c31a03017103e6e08' };
   const state = { active: null, records: [manual, testRecord] };
-  const result = execute(state, { command: '/month', now: at('2026-09-28T01:00:00'), requestId: 'payroll' });
+  const result = execute(state, { command: '/month', now: at('2026-09-28T01:00:00'), requestId: 'payroll' }, { hourlyRate: 1000 });
   assert.match(result.text, /2026年9月の給与対象実働/);
   assert.match(result.text, /20分46秒/);
   assert.match(result.text, /346円/);
   assert.equal(result.state.records.length, 2);
-  const nextMonth = execute(state, { command: '/month', now: at('2026-10-01T00:00:00'), requestId: 'next' });
+  const nextMonth = execute(state, { command: '/month', now: at('2026-10-01T00:00:00'), requestId: 'next' }, { hourlyRate: 1000 });
   assert.match(nextMonth.text, /2026年10月の給与対象実働/);
   assert.match(nextMonth.text, /合計給与：0円/);
 });
@@ -121,9 +121,9 @@ test('月初の給与投稿は前月の開始日に属する終了済み勤務�
   s.run('/start', '2026-09-30T23:30:00'); s.run('/end', '2026-10-01T00:30:00'); // 9月扱い：1時間
   s.run('/start', '2026-10-01T00:30:00'); s.run('/end', '2026-10-01T01:00:00'); // 10月扱い
   const records = [...s.state.records, { id: 'm', kind: 'manual', workDate: '2026-09-27', durationMs: 1246000 }];
-  const report = previousMonthPayroll(records, at('2026-10-01T09:00:00'));
+  const report = previousMonthPayroll(records, at('2026-10-01T09:00:00'), 1000);
   assert.equal(report.key, '2026-09');
   assert.equal(report.duration, 3_600_000 + 1246000);
   assert.equal(report.text, '💴 2026年9月分の給与\n給与対象実働：1時間20分46秒\n時給：1,000円\n合計給与：1,346円');
-  assert.equal(previousMonthPayroll([], at('2027-01-01T09:00:00')).key, '2026-12');
+  assert.equal(previousMonthPayroll([], at('2027-01-01T09:00:00'), 1000).key, '2026-12');
 });

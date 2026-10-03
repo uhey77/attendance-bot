@@ -1,8 +1,8 @@
-import { applyManualRecords } from './manual-records.js';
 import { Buffer } from 'node:buffer';
 import { createHmac, randomUUID } from 'node:crypto';
 import { COMMANDS, execute, previousMonthPayroll, sheetRow } from './attendance.js';
 import { verifySlackRequest, authorizePayload } from './slack-auth.js';
+import { hourlyRate } from './payroll.js';
 
 const json = (text, status = 200) => Response.json({ response_type: 'ephemeral', text }, { status });
 
@@ -12,7 +12,7 @@ export default {
     if (path === '/health' && request.method === 'GET') return Response.json({ ok: true });
     if (path !== '/slack/commands' || request.method !== 'POST') return new Response('Not found', { status: 404 });
     if (!env.SLACK_SIGNING_SECRET || !env.ALLOWED_USER_ID || !env.ALLOWED_TEAM_ID ||
-        !env.GAS_URL || !env.GAS_SHARED_SECRET || !env.SLACK_BOT_TOKEN || !env.POST_CHANNEL_ID || !env.MENTION_USER_ID) return json('接続設定が完了していません。', 503);
+        !env.GAS_URL || !env.GAS_SHARED_SECRET || !env.SLACK_BOT_TOKEN || !env.POST_CHANNEL_ID || !env.MENTION_USER_ID || !env.HOURLY_RATE) return json('接続設定が完了していません。', 503);
     if (!request.headers.get('content-type')?.startsWith('application/x-www-form-urlencoded')) return new Response(null, { status: 415 });
     // Stream with a hard cap, including when Content-Length is absent.
     const reader = request.body?.getReader();
@@ -48,7 +48,7 @@ export default {
 
   // 毎月1日に前月分の給与をメンション付きで投稿する（Cron Trigger）。
   async scheduled(controller, env) {
-    if (!env.ALLOWED_USER_ID || !env.ALLOWED_TEAM_ID) throw new Error('Missing attendance config');
+    if (!env.ALLOWED_USER_ID || !env.ALLOWED_TEAM_ID || !env.HOURLY_RATE) throw new Error('Missing attendance config');
     const id = env.ATTENDANCE.idFromName(`${env.ALLOWED_TEAM_ID}:${env.ALLOWED_USER_ID}`);
     const response = await env.ATTENDANCE.get(id).fetch(new Request('https://internal/monthly-payroll', {
       method: 'POST', body: JSON.stringify({ now: controller.scheduledTime })
@@ -69,13 +69,12 @@ export class AttendanceStore {
       const storage = this.ctx.storage;
       const now = Date.now();
       const text = await storage.transaction(async tx => {
-        await applyManualRecords(tx, this.env);
         const cached = await tx.get(`request:${input.requestId}`);
         if (cached) return cached.text;
         const active = await tx.get('active') || null;
         const reporting = ['/week', '/month'].includes(input.command);
         const records = reporting ? [...(await tx.list({ prefix: 'record:' })).values()] : [];
-        const result = execute({ active, records }, { ...input, now }, { reportingPolicy: 'completed-start-date' });
+        const result = execute({ active, records }, { ...input, now }, { reportingPolicy: 'completed-start-date', hourlyRate: hourlyRate(this.env) });
         const changed = JSON.stringify(active) !== JSON.stringify(result.state.active);
         if (changed) {
           const sequence = (await tx.get('postSequence') || 0) + 1;
@@ -112,9 +111,8 @@ export class AttendanceStore {
   async enqueueMonthlyPayroll({ now }) {
     return this.ctx.blockConcurrencyWhile(async () => {
       await this.ctx.storage.transaction(async tx => {
-        await applyManualRecords(tx, this.env);
         const records = [...(await tx.list({ prefix: 'record:' })).values()];
-        const report = previousMonthPayroll(records, now);
+        const report = previousMonthPayroll(records, now, hourlyRate(this.env));
         // Cronの重複起動でも同じ月の投稿は一度だけにする。
         if (await tx.get(`payrollReport:${report.key}`)) return;
         await tx.put(`payrollReport:${report.key}`, true);

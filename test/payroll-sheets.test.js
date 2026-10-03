@@ -10,7 +10,7 @@ test('月別給与シートは初回のみ作り、翌月を追加しても過�
   const sheet={cells,getRange(a){return {clear(){cells.clear();return this;},getValues(){return cells.get(a)||[['']];},setValue(v){cells.set(a,v);return this;},setValues(v){cells.set(a,v);return this;},setFormula(v){cells.set(a,v);return this;},setNumberFormat(){return this;},setBackground(){return this;},setFontColor(){return this;},setFontWeight(){return this;},setNote(){return this;}};},setColumnWidths(){},setColumnWidth(){},setFrozenRows(){}};
   sheets.set(n,sheet);return sheet;
  }};
- const context=vm.createContext({console});
+ const context=vm.createContext({console,PropertiesService:{getScriptProperties:()=>({getProperty:k=>({HOURLY_RATE:'1000'})[k]})}});
  vm.runInContext(fs.readFileSync(new URL('../gas/Payroll.gs',import.meta.url),'utf8'),context);
  context.payrollMonth_(book,'2026-09');
  assert.deepEqual([...sheets.keys()],['月別給与','2026-09']);

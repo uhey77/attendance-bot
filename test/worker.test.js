@@ -17,7 +17,7 @@ class Storage {
 function fixture() {
   const storage=new Storage(); let serial=Promise.resolve();
   const ctx={storage,blockConcurrencyWhile(fn){const next=serial.then(fn);serial=next.catch(()=>{});return next;}};
-  const env={GAS_SHARED_SECRET:'test-only',GAS_URL:'https://script.google.com/macros/s/test/exec'};
+  const env={GAS_SHARED_SECRET:'test-only',GAS_URL:'https://script.google.com/macros/s/test/exec',HOURLY_RATE:'1000'};
   const actor=new AttendanceStore(ctx,env);
   const command=(command,id)=>actor.fetch(new Request('https://internal/command',{method:'POST',body:JSON.stringify({command,requestId:id})})).then(r=>r.json());
   return {storage,actor,command};
@@ -62,7 +62,7 @@ test('再起動しても勤務状態と再送防止を保持する',async()=>{
 
 test('公開受付は署名・本人・6コマンドを検証してから保存処理を呼ぶ',async()=>{
   let calls=0;
-  const env={SLACK_SIGNING_SECRET:'secret',ALLOWED_USER_ID:'U1',ALLOWED_TEAM_ID:'T1',GAS_URL:'url',GAS_SHARED_SECRET:'key',SLACK_BOT_TOKEN:'test',POST_CHANNEL_ID:'C1',MENTION_USER_ID:'U2',ATTENDANCE:{idFromName:v=>v,get:()=>({fetch:async()=>{calls++;return Response.json({ok:true});}})}};
+  const env={SLACK_SIGNING_SECRET:'secret',ALLOWED_USER_ID:'U1',ALLOWED_TEAM_ID:'T1',GAS_URL:'url',GAS_SHARED_SECRET:'key',SLACK_BOT_TOKEN:'test',POST_CHANNEL_ID:'C1',MENTION_USER_ID:'U2',HOURLY_RATE:'1000',ATTENDANCE:{idFromName:v=>v,get:()=>({fetch:async()=>{calls++;return Response.json({ok:true});}})}};
   function req(user='U1',command='/start',sign=true){
     const body=new URLSearchParams({user_id:user,team_id:'T1',command,trigger_id:'123'}).toString();
     const ts=String(Math.floor(Date.now()/1000));
@@ -101,21 +101,6 @@ test('Slack投稿の結果が不明な場合、再送してメンションを重
 });
 
 
-test('承認済みの手動記録は本人の保存領域だけに一度追加する', async () => {
-  const { applyManualRecords } = await import('../src/manual-records.js');
-  const storage = new Storage();
-  await applyManualRecords(storage, {});
-  assert.equal(storage.data.size, 0);
-  const env = { ALLOWED_TEAM_ID: 'T00000000', ALLOWED_USER_ID: 'U00000001' };
-  await storage.put('active', { id: 'ongoing' });
-  await storage.transaction(tx => applyManualRecords(tx, env));
-  await storage.transaction(tx => applyManualRecords(tx, env));
-  assert.equal((await storage.list({ prefix: 'record:' })).size, 1);
-  assert.equal((await storage.get('record:manual-20260927-20m46s-01')).durationMs, 1246000);
-  assert.deepEqual(await storage.get('active'), { id: 'ongoing' });
-  assert.equal((await storage.list({ prefix: 'slack:' })).size, 0);
-});
-
 test('毎月1日のCronで前月分の給与を独立した親投稿としてメンション付きで一度だけ送る',async(t)=>{
  const f=fixture();Object.assign(f.actor.env,{SLACK_BOT_TOKEN:'test',POST_CHANNEL_ID:'C123',MENTION_USER_ID:'U123'});
  const sent=[];
@@ -126,7 +111,7 @@ test('毎月1日のCronで前月分の給与を独立した親投稿としてメ
  await f.storage.put('record:a',{id:'a',startedAt:Date.parse('2026-09-10T10:00:00+09:00'),endedAt:0,work:[[0,7_200_000]]});
  await f.storage.put('record:b',{id:'b',startedAt:Date.parse('2026-10-01T08:00:00+09:00'),endedAt:0,work:[[0,3_600_000]]});
  let calls=0;
- const env={ALLOWED_USER_ID:'U1',ALLOWED_TEAM_ID:'T1',ATTENDANCE:{idFromName:v=>v,get:()=>({fetch:r=>{calls++;return f.actor.fetch(r);}})}};
+ const env={ALLOWED_USER_ID:'U1',ALLOWED_TEAM_ID:'T1',HOURLY_RATE:'1000',ATTENDANCE:{idFromName:v=>v,get:()=>({fetch:r=>{calls++;return f.actor.fetch(r);}})}};
  const scheduledTime=Date.parse('2026-10-01T09:00:00+09:00');
  await worker.scheduled({scheduledTime},env);
  await worker.scheduled({scheduledTime},env); // Cronの重複起動

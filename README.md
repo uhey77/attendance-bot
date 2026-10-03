@@ -48,6 +48,7 @@ cp .env.example .env
 | `ALLOWED_USER_ID` | 記録を許可する本人のユーザーID |
 | `POST_CHANNEL_ID` | 開始・休憩・再開・終了を投稿するチャンネルのID |
 | `MENTION_USER_ID` | 勤務開始の親投稿でメンションするユーザーのID |
+| `HOURLY_RATE` | 給与計算に使う時給（円） |
 | `GAS_URL` | Apps Scriptウェブアプリの `/exec` URL |
 | `GAS_SHARED_SECRET` | Apps Scriptと共有する署名用の鍵 |
 
@@ -62,7 +63,7 @@ cp .env.example .env
 ### Google Apps Script
 
 1. `gas/Code.gs`・`gas/Payroll.gs`・`gas/appsscript.json` をApps Scriptプロジェクトに反映します。
-2. スクリプトプロパティに `GAS_SHARED_SECRET` を設定します。
+2. スクリプトプロパティに `GAS_SHARED_SECRET` と `HOURLY_RATE`（時給・円）を設定します。`HOURLY_RATE` は月別給与シートを新しく作るときに使います。
 3. `setup()` を実行すると記録用シートを作成し、`SPREADSHEET_ID` を保存します。既存シートを使う場合は先にそのIDを設定してください。
 4. ウェブアプリとして本人権限で実行し、Workerから呼べるよう公開します。受信した本文の署名を検証するため、URLを知っているだけでは記録できません。
 
