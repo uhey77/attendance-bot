@@ -1,7 +1,7 @@
 import { applyManualRecords } from './manual-records.js';
 import { Buffer } from 'node:buffer';
 import { createHmac, randomUUID } from 'node:crypto';
-import { COMMANDS, execute, sheetRow } from './attendance.js';
+import { COMMANDS, execute, previousMonthPayroll, sheetRow } from './attendance.js';
 import { verifySlackRequest, authorizePayload } from './slack-auth.js';
 
 const json = (text, status = 200) => Response.json({ response_type: 'ephemeral', text }, { status });
@@ -44,6 +44,16 @@ export default {
       console.error('Attendance persistence failed');
       return json('処理結果を確認できませんでした。同じ操作を再実行する前に状態をご確認ください。', 503);
     }
+  },
+
+  // 毎月1日に前月分の給与をメンション付きで投稿する（Cron Trigger）。
+  async scheduled(controller, env) {
+    if (!env.ALLOWED_USER_ID || !env.ALLOWED_TEAM_ID) throw new Error('Missing attendance config');
+    const id = env.ATTENDANCE.idFromName(`${env.ALLOWED_TEAM_ID}:${env.ALLOWED_USER_ID}`);
+    const response = await env.ATTENDANCE.get(id).fetch(new Request('https://internal/monthly-payroll', {
+      method: 'POST', body: JSON.stringify({ now: controller.scheduledTime })
+    }));
+    if (!response.ok) throw new Error('Monthly payroll enqueue failed');
   }
 };
 
@@ -53,6 +63,7 @@ export class AttendanceStore {
   constructor(ctx, env) { this.ctx = ctx; this.env = env; }
 
   async fetch(request) {
+    if (new URL(request.url).pathname === '/monthly-payroll') return this.enqueueMonthlyPayroll(await request.json());
     const input = await request.json();
     return this.ctx.blockConcurrencyWhile(async () => {
       const storage = this.ctx.storage;
@@ -98,6 +109,26 @@ export class AttendanceStore {
     });
   }
 
+  async enqueueMonthlyPayroll({ now }) {
+    return this.ctx.blockConcurrencyWhile(async () => {
+      await this.ctx.storage.transaction(async tx => {
+        await applyManualRecords(tx, this.env);
+        const records = [...(await tx.list({ prefix: 'record:' })).values()];
+        const report = previousMonthPayroll(records, now);
+        // Cronの重複起動でも同じ月の投稿は一度だけにする。
+        if (await tx.get(`payrollReport:${report.key}`)) return;
+        await tx.put(`payrollReport:${report.key}`, true);
+        const sequence = (await tx.get('postSequence') || 0) + 1;
+        await tx.put('postSequence', sequence);
+        await tx.put(`slack:${String(sequence).padStart(12, '0')}`, {
+          command: 'payroll', text: report.text, clientId: randomUUID(), status: 'pending'
+        });
+        if (!(await tx.getAlarm())) await tx.setAlarm(Date.now() + 1000);
+      });
+      return Response.json({ ok: true });
+    });
+  }
+
   async alarm() {
     const storage = this.ctx.storage;
     // Schedule recovery before doing network work, including process termination.
@@ -127,8 +158,10 @@ export class AttendanceStore {
     for (const [key, event] of posts) {
       if (event.status === 'uncertain') { failed = true; break; }
       try {
-        const thread = await storage.get(`thread:${event.sessionId}`);
-        if (event.command !== '/start' && !thread) throw new Error('Missing thread');
+        // 給与の月次投稿は勤務スレッドに属さない独立した親投稿にする。
+        const standalone = event.command === 'payroll';
+        const thread = standalone ? null : await storage.get(`thread:${event.sessionId}`);
+        if (!standalone && event.command !== '/start' && !thread) throw new Error('Missing thread');
         if (!this.env.SLACK_BOT_TOKEN || !/^[CG][A-Z0-9]+$/.test(this.env.POST_CHANNEL_ID || '') ||
             !/^[UW][A-Z0-9]+$/.test(this.env.MENTION_USER_ID || '')) throw new Error('Missing Slack config');
         // An ambiguous network failure must not produce duplicate mentions on retry.
@@ -136,7 +169,7 @@ export class AttendanceStore {
         const response = await fetch('https://slack.com/api/chat.postMessage', {
           method: 'POST', headers: { authorization: `Bearer ${this.env.SLACK_BOT_TOKEN}`, 'content-type': 'application/json' },
           body: JSON.stringify({ channel: this.env.POST_CHANNEL_ID,
-            text: event.command === '/start' ? `<@${this.env.MENTION_USER_ID}>\n${event.text}` : event.text,
+            text: event.command === '/start' || standalone ? `<@${this.env.MENTION_USER_ID}>\n${event.text}` : event.text,
             ...(thread ? { thread_ts: thread } : {}), client_msg_id: event.clientId,
             unfurl_links: false, unfurl_media: false, reply_broadcast: false }),
           signal: AbortSignal.timeout(10_000)

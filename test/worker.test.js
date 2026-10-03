@@ -115,3 +115,25 @@ test('承認済みの手動記録は本人の保存領域だけに一度追加�
   assert.deepEqual(await storage.get('active'), { id: 'ongoing' });
   assert.equal((await storage.list({ prefix: 'slack:' })).size, 0);
 });
+
+test('毎月1日のCronで前月分の給与を独立した親投稿としてメンション付きで一度だけ送る',async(t)=>{
+ const f=fixture();Object.assign(f.actor.env,{SLACK_BOT_TOKEN:'test',POST_CHANNEL_ID:'C123',MENTION_USER_ID:'U123'});
+ const sent=[];
+ t.mock.method(globalThis,'fetch',async(url,options)=>{
+   if(String(url).includes('script.google.com'))return Response.json({ok:true});
+   sent.push(JSON.parse(options.body));return Response.json({ok:true,ts:String(sent.length)+'.000001'});
+ });
+ await f.storage.put('record:a',{id:'a',startedAt:Date.parse('2026-09-10T10:00:00+09:00'),endedAt:0,work:[[0,7_200_000]]});
+ await f.storage.put('record:b',{id:'b',startedAt:Date.parse('2026-10-01T08:00:00+09:00'),endedAt:0,work:[[0,3_600_000]]});
+ let calls=0;
+ const env={ALLOWED_USER_ID:'U1',ALLOWED_TEAM_ID:'T1',ATTENDANCE:{idFromName:v=>v,get:()=>({fetch:r=>{calls++;return f.actor.fetch(r);}})}};
+ const scheduledTime=Date.parse('2026-10-01T09:00:00+09:00');
+ await worker.scheduled({scheduledTime},env);
+ await worker.scheduled({scheduledTime},env); // Cronの重複起動
+ assert.equal(calls,2);
+ for(let i=0;i<3;i++)await f.actor.alarm();
+ assert.equal(sent.length,1);
+ assert.equal(sent[0].channel,'C123');assert.equal(sent[0].thread_ts,undefined);
+ assert.equal(sent[0].text,'<@U123>\n💴 2026年9月分の給与\n給与対象実働：2時間0分0秒\n時給：1,000円\n合計給与：2,000円');
+ assert.equal(f.storage.alarm,null);
+});
