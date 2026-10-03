@@ -81,8 +81,9 @@ export function execute(state, { command, now, requestId }) {
       if (command === '/month') {
         const eligible = { ...result, records: result.records.filter(r => !PAYROLL_EXCLUDED_IDS.has(r.id)) };
         const duration = summarize(eligible, command, now);
-        const month = new Date(now + JST).toISOString().slice(0, 7);
-        return reply(`📊 ${month} の給与対象実働：${exactDuration(duration)}\n時給：${HOURLY_RATE.toLocaleString('ja-JP')}円\n今月の合計給与：${wages(duration).toLocaleString('ja-JP')}円`);
+        const date = new Date(now + JST);
+        const month = `${date.getUTCFullYear()}年${date.getUTCMonth() + 1}月`;
+        return reply(`📊 ${month}の給与対象実働：${exactDuration(duration)}\n時給：${HOURLY_RATE.toLocaleString('ja-JP')}円\n今月の合計給与：${wages(duration).toLocaleString('ja-JP')}円`);
       }
       return reply(`📊 ${label}の実働：${formatDuration(summarize(result, command, now))}`);
     }
