@@ -26,12 +26,6 @@
     "enabled": true,
     "head_sampling_rate": 1
   },
-  "vars": {
-    "ALLOWED_TEAM_ID": "T00000000",
-    "POST_CHANNEL_ID": "C00000000",
-    "ALLOWED_USER_ID": "U00000001",
-    "MENTION_USER_ID": "U00000002"
-  },
   // 毎月1日 9:00（日本時間）に前月分の給与を投稿する。Cronの時刻はUTC。
   "triggers": {
     "crons": ["0 0 1 * *"]
