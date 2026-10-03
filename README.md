@@ -36,7 +36,9 @@ Cloudflareを記録の正本とし、Sheetsは自動反映先です。シート�
 
 ## 開発
 
-Node.js 20以降。`npm ci`、`npm test`、`npm run check`。`npm run dev`でローカル実行、`npm run deploy`で公開します。デプロイ前に `npx wrangler whoami` で対象アカウントを確認してください。
+Node.js 22以降。`npm ci`、`npm test`、`npm run check`。`npm run dev`でローカル実行、`npm run deploy`で公開します。デプロイ前に `npx wrangler whoami` で対象アカウントを確認してください。
+
+PRが `main` にマージされると、GitHub Actions（`.github/workflows/deploy.yml`）がテスト成功後に自動で `wrangler deploy` します。テスト失敗時はデプロイしません。Actions画面から手動実行も可能です。リポジトリのシークレットに `CLOUDFLARE_API_TOKEN`（Workers編集権限のAPIトークン）と `CLOUDFLARE_ACCOUNT_ID` が必要です。Apps Script（`gas/`）は自動デプロイの対象外で、従来どおり手動で反映します。
 
 20件の自動テストが成功。実際のWorkersローカル環境でも6コマンドを署名付きで実行し、保存と応答を確認しました（5〜51ms、本番の遅延保証ではありません）。Slack本番の開始・休憩・再開・終了・週間/月間集計とGoogle Sheetsへの保存まで確認済みです。
 

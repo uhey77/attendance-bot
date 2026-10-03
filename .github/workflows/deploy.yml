@@ -1,0 +1,38 @@
+# mainへのマージ（push）時に、テストを通してからCloudflare Workersへデプロイする。
+name: Deploy
+
+on:
+  push:
+    branches: [main]
+  # 手動で再デプロイしたいとき用
+  workflow_dispatch:
+
+# 連続マージ時にデプロイが並行しないよう直列化する（実行中のデプロイは中断しない）
+concurrency:
+  group: deploy-production
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci
+
+      - run: npm test
+
+      - name: Cloudflare Workersへデプロイ
+        run: npx wrangler deploy
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
