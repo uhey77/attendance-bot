@@ -7,10 +7,11 @@ test('月別給与シートは初回のみ作り、翌月を追加しても過�
  const sheets=new Map();
  const book={getSheetByName:n=>sheets.get(n),insertSheet(n){
   const cells=new Map();
-  const sheet={cells,getRange(a){return {clear(){cells.clear();return this;},getValues(){return cells.get(a)||[['']];},setValue(v){cells.set(a,v);return this;},setValues(v){cells.set(a,v);return this;},setFormula(v){cells.set(a,v);return this;},setNumberFormat(){return this;},setBackground(){return this;},setFontColor(){return this;},setFontWeight(){return this;},setNote(){return this;}};},setColumnWidths(){},setColumnWidth(){},setFrozenRows(){}};
+  const sheet={cells,getRange(a){return {clear(){cells.clear();return this;},getValues(){return cells.get(a)||[['']];},getFormula(){return cells.get(a)||'';},setValue(v){cells.set(a,v);return this;},setValues(v){cells.set(a,v);return this;},setFormula(v){cells.set(a,v);return this;},setNumberFormat(){return this;},setBackground(){return this;},setFontColor(){return this;},setFontWeight(){return this;},setNote(){return this;}};},hideColumns(){},setColumnWidths(){},setColumnWidth(){},setFrozenRows(){}};
   sheets.set(n,sheet);return sheet;
  }};
- const context=vm.createContext({console,PropertiesService:{getScriptProperties:()=>({getProperty:k=>({HOURLY_RATE:'1000'})[k]})}});
+ const props={HOURLY_RATE:'1000'};
+ const context=vm.createContext({console,PropertiesService:{getScriptProperties:()=>({getProperty:k=>props[k]??null})}});
  vm.runInContext(fs.readFileSync(new URL('../gas/Payroll.gs',import.meta.url),'utf8'),context);
  context.payrollMonth_(book,'2026-09');
  assert.deepEqual([...sheets.keys()],['月別給与','2026-09']);
@@ -19,11 +20,22 @@ test('月別給与シートは初回のみ作り、翌月を追加しても過�
  assert.match(monthly.cells.get('A2'),/group by Col1/);
  assert.match(monthly.cells.get('A2'),/12147896323831/);
  assert.match(monthly.cells.get('A2'),/12158189900133/);
- assert.equal(monthly.cells.get('D2'),'=ARRAYFORMULA(IF(A2:A="","",C2:C*24*1000))');
- assert.match(sheets.get('月別給与').cells.get('D2'),/ROUND\(B2:B\*24\*C2:C,0\)/);
+ assert.equal(monthly.cells.get('D2'),'=ARRAYFORMULA(IF(A2:A="","",(C2:C+E2:E*0.25)*24*1000))');
+ assert.match(sheets.get('月別給与').cells.get('D2'),/ROUND\(\(B2:B\+E2:E\*0.25\)\*24\*C2:C,0\)/);
+ assert.match(monthly.cells.get('E2'),/H2:H/);
+ assert.match(monthly.cells.get('E2'),/12147896323831/);
  monthly.cells.set('A2','sentinel');
+ // 旧式の給与式を更新しても、過去月の時給は保持する。
+ monthly.cells.set('D2','=ARRAYFORMULA(IF(A2:A="","",C2:C*24*1000))');
+ props.HOURLY_RATE='2000';
  context.payrollMonth_(book,'2026-09');context.payrollMonth_(book,'2026-10');
  assert.equal(monthly.cells.get('A2'),'sentinel');
+ assert.match(monthly.cells.get('D2'),/24\*1000/);
+ assert.match(sheets.get('2026-10').cells.get('D2'),/24\*2000/);
+ props.NIGHT_MULTIPLIER='1.5';
+ context.payrollMonth_(book,'2026-09');
+ assert.match(monthly.cells.get('D2'),/E2:E\*0.5/);
+ assert.match(monthly.cells.get('D2'),/24\*1000/);
  assert.deepEqual([...sheets.keys()],['月別給与','2026-09','2026-10']);
  assert.throws(()=>context.payrollMonth_(book,'invalid'));
 });

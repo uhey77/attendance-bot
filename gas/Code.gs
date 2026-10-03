@@ -48,8 +48,11 @@ function doPost(e) {
     if (typeof data.id !== 'string' || !/^[A-Za-z0-9._:-]{1,256}$/.test(data.id) ||
         !Array.isArray(data.row) || data.row.length !== 5 ||
         !/^\d{4}\/\d{2}\/\d{2}$/.test(data.row[0]) ||
-        !data.row.slice(1, 3).every(v => typeof v === 'string' && /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test(v)) ||
-        !data.row.slice(3).every(v => typeof v === 'number' && Number.isFinite(v) && v >= 0)) throw new Error('Invalid record');
+        !(data.row.slice(1, 3).every(v => typeof v === 'string' && /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test(v)) ||
+          (data.row[1] === '' && data.row[2] === '' && data.row[3] === '')) ||
+        !data.row.slice(3).every((v, i) => (i === 0 && v === '' && data.row[1] === '') ||
+          (typeof v === 'number' && Number.isFinite(v) && v >= 0))) throw new Error('Invalid record');
+    if (data.work !== undefined) validateWork_(data);
     const lock = LockService.getScriptLock();
     if (!lock.tryLock(5000)) throw new Error('Busy');
     try {
@@ -60,6 +63,11 @@ function doPost(e) {
       if (!exists) {
         sheet.appendRow([...data.row, data.id]);
         SpreadsheetApp.flush();
+      }
+      if (data.work !== undefined) {
+        nightHeaders_(sheet);
+        const row = exists ? exists.getRow() : sheet.getLastRow();
+        sheet.getRange(row, 7, 1, 2).setValues([[JSON.stringify(data.work), nightMinutes_(data.work, nightSettings_())]]);
       }
       payrollMonth_(SpreadsheetApp.openById(id), data.row[0].slice(0, 7).replaceAll('/', '-'));
       SpreadsheetApp.flush();

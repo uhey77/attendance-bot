@@ -1,4 +1,4 @@
-import { PAYROLL_EXCLUDED_IDS, wages, exactDuration } from './payroll.js';
+import { payrollTotals, nightSettings, nightDescription, exactDuration } from './payroll.js';
 // Pure attendance logic. The adapter must serialize commands and persist the
 // returned state before acknowledging success. All timestamps are epoch ms.
 export const COMMANDS = ['/start', '/break', '/resume', '/end', '/week', '/month'];
@@ -42,7 +42,7 @@ export function summarize(state, command, now) {
   ), 0);
 }
 
-export function execute(state, { command, now, requestId }, { hourlyRate } = {}) {
+export function execute(state, { command, now, requestId }, { hourlyRate, night = nightSettings() } = {}) {
   if (!Number.isSafeInteger(now) || !Number.isFinite(new Date(now).getTime())) throw new Error('Invalid timestamp');
   if (typeof requestId !== 'string' || !requestId) throw new Error('A request ID is required');
   const result = structuredClone(state);
@@ -79,11 +79,15 @@ export function execute(state, { command, now, requestId }, { hourlyRate } = {})
     case '/month': {
       const label = { '/week': '今週', '/month': '今月' }[command];
       if (command === '/month') {
-        const eligible = { ...result, records: result.records.filter(r => !PAYROLL_EXCLUDED_IDS.has(r.id)) };
-        const duration = summarize(eligible, command, now);
+        const start = periodStart(command, now);
+        const eligible = result.records.filter(r => {
+          const date = r.kind === 'manual' ? Date.parse(r.workDate + 'T00:00:00+09:00') : r.startedAt;
+          return date >= start && date <= now;
+        });
+        const { duration, nightDuration, amount } = payrollTotals(eligible, hourlyRate, night);
         const date = new Date(now + JST);
         const month = `${date.getUTCFullYear()}年${date.getUTCMonth() + 1}月`;
-        return reply(`📊 ${month}の給与対象実働：${exactDuration(duration)}\n時給：${hourlyRate.toLocaleString('ja-JP')}円\n今月の合計給与：${wages(duration, hourlyRate).toLocaleString('ja-JP')}円`);
+        return reply(`📊 ${month}の給与対象実働：${exactDuration(duration)}${nightDescription(nightDuration, night)}\n時給：${hourlyRate.toLocaleString('ja-JP')}円\n今月の合計給与：${amount.toLocaleString('ja-JP')}円`);
       }
       return reply(`📊 ${label}の実働：${formatDuration(summarize(result, command, now))}`);
     }
@@ -100,18 +104,18 @@ export function sheetRow(record) {
 }
 
 // 月初の定期投稿用：前月（日本時間）の開始日に属する終了済み勤務の給与を集計する。
-export function previousMonthPayroll(records, now, hourlyRate) {
+export function previousMonthPayroll(records, now, hourlyRate, night = nightSettings()) {
   const date = new Date(now + JST);
   const year = date.getUTCFullYear(), month = date.getUTCMonth();
   const start = Date.UTC(year, month - 1, 1) - JST;
   const end = Date.UTC(year, month, 1) - JST;
-  const duration = records.reduce((sum, record) => {
-    if (PAYROLL_EXCLUDED_IDS.has(record.id)) return sum;
+  const eligible = records.filter(record => {
     const startedAt = record.kind === 'manual' ? Date.parse(record.workDate + 'T00:00:00+09:00') : record.startedAt;
-    return startedAt >= start && startedAt < end ? sum + workMilliseconds(record) : sum;
-  }, 0);
+    return startedAt >= start && startedAt < end;
+  });
+  const { duration, nightDuration, amount } = payrollTotals(eligible, hourlyRate, night);
   const target = new Date(start + JST);
   const key = `${target.getUTCFullYear()}-${String(target.getUTCMonth() + 1).padStart(2, '0')}`;
   const label = `${target.getUTCFullYear()}年${target.getUTCMonth() + 1}月`;
-  return { key, duration, text: `💴 ${label}分の給与\n給与対象実働：${exactDuration(duration)}\n時給：${hourlyRate.toLocaleString('ja-JP')}円\n合計給与：${wages(duration, hourlyRate).toLocaleString('ja-JP')}円` };
+  return { key, duration, nightDuration, amount, text: `💴 ${label}分の給与\n給与対象実働：${exactDuration(duration)}${nightDescription(nightDuration, night)}\n時給：${hourlyRate.toLocaleString('ja-JP')}円\n合計給与：${amount.toLocaleString('ja-JP')}円` };
 }

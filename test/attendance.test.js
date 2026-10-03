@@ -124,6 +124,6 @@ test('月初の給与投稿は前月の開始日に属する終了済み勤務�
   const report = previousMonthPayroll(records, at('2026-10-01T09:00:00'), 1000);
   assert.equal(report.key, '2026-09');
   assert.equal(report.duration, 3_600_000 + 1246000);
-  assert.equal(report.text, '💴 2026年9月分の給与\n給与対象実働：1時間20分46秒\n時給：1,000円\n合計給与：1,346円');
+  assert.equal(report.text, '💴 2026年9月分の給与\n給与対象実働：1時間20分46秒\n深夜実働（22:00〜5:00・1.25倍）：1時間0分0秒\n時給：1,000円\n合計給与：1,596円');
   assert.equal(previousMonthPayroll([], at('2027-01-01T09:00:00'), 1000).key, '2026-12');
 });
