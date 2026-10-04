@@ -2,7 +2,7 @@ import { Buffer } from 'node:buffer';
 import { createHmac, randomUUID } from 'node:crypto';
 import { COMMANDS, execute, previousMonthPayroll, sheetRow } from './attendance.js';
 import { verifySlackRequest, authorizePayload } from './slack-auth.js';
-import { hourlyRate } from './payroll.js';
+import { hourlyRate, nightSettings } from './payroll.js';
 
 const json = (text, status = 200) => Response.json({ response_type: 'ephemeral', text }, { status });
 
@@ -71,10 +71,11 @@ export class AttendanceStore {
       const text = await storage.transaction(async tx => {
         const cached = await tx.get(`request:${input.requestId}`);
         if (cached) return cached.text;
+        await this.enqueueNightBackfill(tx);
         const active = await tx.get('active') || null;
         const reporting = ['/week', '/month'].includes(input.command);
         const records = reporting ? [...(await tx.list({ prefix: 'record:' })).values()] : [];
-        const result = execute({ active, records }, { ...input, now }, { reportingPolicy: 'completed-start-date', hourlyRate: hourlyRate(this.env) });
+        const result = execute({ active, records }, { ...input, now }, { hourlyRate: hourlyRate(this.env), night: nightSettings(this.env) });
         const changed = JSON.stringify(active) !== JSON.stringify(result.state.active);
         if (changed) {
           const sequence = (await tx.get('postSequence') || 0) + 1;
@@ -111,8 +112,9 @@ export class AttendanceStore {
   async enqueueMonthlyPayroll({ now }) {
     return this.ctx.blockConcurrencyWhile(async () => {
       await this.ctx.storage.transaction(async tx => {
+        await this.enqueueNightBackfill(tx);
         const records = [...(await tx.list({ prefix: 'record:' })).values()];
-        const report = previousMonthPayroll(records, now, hourlyRate(this.env));
+        const report = previousMonthPayroll(records, now, hourlyRate(this.env), nightSettings(this.env));
         // Cronの重複起動でも同じ月の投稿は一度だけにする。
         if (await tx.get(`payrollReport:${report.key}`)) return;
         await tx.put(`payrollReport:${report.key}`, true);
@@ -127,6 +129,18 @@ export class AttendanceStore {
     });
   }
 
+  async enqueueNightBackfill(tx) {
+    // 初回コマンド/Cronで過去の実働区間を再転記。勤務やSlack投稿は増やさない。
+    if (await tx.get('nightBackfill:v1')) return;
+    for (const record of (await tx.list({ prefix: 'record:' })).values()) {
+      await tx.put(`outbox:${record.id}`, record);
+    }
+    await tx.put('nightBackfill:v1', true);
+    if ((await tx.list({ prefix: 'outbox:', limit: 1 })).size && !(await tx.getAlarm())) {
+      await tx.setAlarm(Date.now() + 1000);
+    }
+  }
+
   async alarm() {
     const storage = this.ctx.storage;
     // Schedule recovery before doing network work, including process termination.
@@ -135,7 +149,7 @@ export class AttendanceStore {
     let failed = false;
     for (const [key, record] of pending) {
       try {
-        const payload = JSON.stringify({ id: record.id, row: sheetRow(record) });
+        const payload = JSON.stringify({ id: record.id, row: sheetRow(record), work: record.kind === 'manual' ? [] : record.work });
         const timestamp = String(Math.floor(Date.now() / 1000));
         const signature = createHmac('sha256', this.env.GAS_SHARED_SECRET)
           .update(`${timestamp}.${payload}`).digest('hex');

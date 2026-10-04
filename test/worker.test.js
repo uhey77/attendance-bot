@@ -44,12 +44,33 @@ test('Sheets失敗時に保存を維持し、次の再試行成功で反映待�
   stub.mock.mockImplementation(async(_url,options)=>{
     const envelope=JSON.parse(options.body);
     assert.equal(envelope.signature,createHmac('sha256','test-only').update(`${envelope.timestamp}.${envelope.payload}`).digest('hex'));
+    assert.deepEqual(JSON.parse(envelope.payload).work,[...(await f.storage.list({prefix:'record:'})).values()][0].work);
     return Response.json({ok:true});
   });
   await f.actor.alarm();
   assert.equal((await f.storage.list({prefix:'outbox:'})).size,0);
   assert.equal((await f.storage.list({prefix:'record:'})).size,1);
   assert.ok(f.storage.alarm); // Slack posting still pending without its configuration.
+});
+
+test('深夜料金導入時は過去の全勤務を一度だけ再転記し、勤務と公開投稿を増やさない',async(t)=>{
+  const f=fixture();
+  const old={id:'old',startedAt:Date.parse('2026-09-30T23:00:00+09:00'),endedAt:Date.parse('2026-10-01T01:00:00+09:00'),work:[[Date.parse('2026-09-30T23:00:00+09:00'),Date.parse('2026-10-01T01:00:00+09:00')]]};
+  await f.storage.put('record:old',old);
+  await f.storage.put('record:manual',{id:'manual',kind:'manual',workDate:'2026-09-30',durationMs:60000});
+  await f.command('/month','first');
+  assert.equal((await f.storage.list({prefix:'outbox:'})).size,2);
+  assert.ok(f.storage.alarm);
+  const sent=[];
+  t.mock.method(globalThis,'fetch',async(_url,options)=>{sent.push(JSON.parse(JSON.parse(options.body).payload));return Response.json({ok:true});});
+  await f.actor.alarm();
+  assert.equal(sent.length,2);
+  assert.deepEqual(sent.find(r=>r.id==='old').work,old.work);
+  assert.deepEqual(sent.find(r=>r.id==='manual').work,[]);
+  await f.command('/month','second');
+  assert.equal((await f.storage.list({prefix:'outbox:'})).size,0);
+  assert.equal((await f.storage.list({prefix:'record:'})).size,2);
+  assert.equal((await f.storage.list({prefix:'slack:'})).size,0);
 });
 
 test('再起動しても勤務状態と再送防止を保持する',async()=>{
@@ -119,6 +140,6 @@ test('毎月1日のCronで前月分の給与を独立した親投稿としてメ
  for(let i=0;i<3;i++)await f.actor.alarm();
  assert.equal(sent.length,1);
  assert.equal(sent[0].channel,'C123');assert.equal(sent[0].thread_ts,undefined);
- assert.equal(sent[0].text,'<@U123>\n💴 2026年9月分の給与\n給与対象実働：2時間0分0秒\n時給：1,000円\n合計給与：2,000円');
+ assert.equal(sent[0].text,'<@U123>\n💴 2026年9月分の給与\n給与対象実働：2時間0分0秒\n深夜実働（22:00〜5:00・1.25倍）：0分0秒\n時給：1,000円\n合計給与：2,000円');
  assert.equal(f.storage.alarm,null);
 });
