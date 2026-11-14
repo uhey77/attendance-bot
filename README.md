@@ -1,125 +1,62 @@
 # 勤怠ボット
 
-本人専用のSlack勤怠Botです。Slackのスラッシュコマンドで勤務の開始・休憩・終了を記録し、Google Sheetsへ自動で転記します。
+Slackのコマンドで勤務・休憩を記録し、実働時間と給与を集計する、本人専用のBotです。終了した勤務はGoogle Sheetsにも転記します。
 
-## コマンド
+## 使い方
 
-| コマンド | 動作 |
-|---|---|
-| `/start` | 作業開始 |
-| `/bi` | 休憩開始 |
-| `/bo` | 休憩終了・作業再開 |
-| `/end` | 終了して休憩を除いた実働を保存 |
-| `/week` | 月曜始まりの今週の終了済み実働 |
-| `/month` | 今月の終了済み実働 |
+| コマンド | 操作 |
+| --- | --- |
+| `/start` | 勤務を開始 |
+| `/bi` | 休憩を開始 |
+| `/bo` | 休憩を終了して勤務を再開 |
+| `/end` | 勤務を終了し、実働を保存 |
+| `/week` | 今週の終了済み勤務を集計（月曜始まり） |
+| `/month` | 今月の終了済み勤務と給与を集計 |
 
-- 集計は日本時間の開始日へ全時間を計上します（23時〜翌1時の勤務は前日の2時間、翌0時30分開始なら翌日の勤務）。
-- 休憩・再開では所属日を変えません。
-- 作業中・休憩中の未終了勤務は集計に含めません。
-- 深夜は日本時間の22:00〜翌5:00の実働を通常時給の1.25倍で計算します。開始時刻は含み、終了時刻は含みません。実働区間で判定し、休憩は除外します。過去の終了済み勤務にも適用します。
-- 開始・終了時刻が不明の手動記録は通常時給で計算します。
-- `/month` と月初の給与投稿には深夜実働・倍率も表示します。通常分と割増分を合算し、月合計で1円未満を一度だけ四捨五入します。
-- 時間は内部ではミリ秒、Sheetsでは小数の分で保持し、Slack表示時だけ分単位で四捨五入します。
+毎月1日9:00（日本時間）には、前月の給与を指定チャンネルに投稿します。
 
-## 構成
+## 仕組み
 
+```text
+Slack → Cloudflare Workers / Durable Object → Google Apps Script → Google Sheets
 ```
-Slack → Cloudflare Workers（署名・本人確認）→ Durable Object（保存・集計）→ Apps Script（署名・重複確認）→ Google Sheets
-```
-
-- Cloudflareを記録の正本とし、Sheetsは自動反映先です。シートを手で編集してもSlackの集計には反映されません。
-- 終了時はCloudflareへ保存してから応答し、Sheetsへの転記は別処理で行います。失敗した転記は最大1時間間隔で再試行します。
-- 本人以外は記録を変更できず、通常のチャンネルメッセージは読みません。
-- コマンドには本人だけが見える応答を返し、開始・休憩・再開・終了は指定チャンネルへBotとして投稿します。
-  - 勤務開始で新しい親投稿を作り、指定ユーザーを親投稿だけでメンションします。以後の操作は同じスレッドに返信します。
-  - `/week`・`/month` の集計は公開投稿しません。
-  - 毎月1日 9:00（日本時間）に、前月分の給与（給与対象実働・時給・合計給与）を指定ユーザーへのメンション付きで独立した投稿として送ります（Cron Trigger）。集計対象は投稿時点で終了済みの勤務です。
-
-## 環境変数
-
-設定値はすべて `.env` にまとめます。`.env.example` をコピーして値を埋めてください（`.env` はGit管理外です）。
-
-```bash
-cp .env.example .env
-```
-
-| 変数 | 内容 |
-|---|---|
-| `SLACK_SIGNING_SECRET` | SlackアプリのSigning Secret |
-| `SLACK_BOT_TOKEN` | SlackアプリのBotトークン（`xoxb-`） |
-| `ALLOWED_TEAM_ID` | 利用を許可するSlackワークスペースのID |
-| `ALLOWED_USER_ID` | 記録を許可する本人のユーザーID |
-| `POST_CHANNEL_ID` | 開始・休憩・再開・終了を投稿するチャンネルのID |
-| `MENTION_USER_ID` | 勤務開始の親投稿でメンションするユーザーのID |
-| `HOURLY_RATE` | 給与計算に使う通常時給（円） |
-| `NIGHT_START_HOUR` | 日本時間の深夜開始時刻（0〜23の整数、既定22） |
-| `NIGHT_END_HOUR` | 日本時間の深夜終了時刻（0〜23の整数、既定5） |
-| `NIGHT_MULTIPLIER` | 深夜時給の倍率（既定1.25、1で割増なし） |
-| `GAS_URL` | Apps Scriptウェブアプリの `/exec` URL |
-| `GAS_SHARED_SECRET` | Apps Scriptと共有する署名用の鍵 |
-
-`npm run dev` ではローカルの `.env` が読み込まれます。`npm run deploy` では `.env` の値がCloudflareの暗号化シークレットとして一緒にアップロードされます。
 
 ## セットアップ
 
-### Slack
+1. 依存パッケージと設定ファイルを準備します。
 
-`slack-manifest.json` からアプリを作成します（コマンドのURLは自分のWorkerのURLに置き換えてください）。必要な権限は `commands` と `chat:write` のみで、メッセージの閲覧権限は要求しません。インストール後、Botを投稿先チャンネルに追加します。
+   ```bash
+   npm ci
+   cp .env.example .env
+   ```
 
-### Google Apps Script
+2. **Slack**：`slack-manifest.json` からアプリを作成し、各コマンドのURLを `https://<WorkerのURL>/slack/commands` に設定します。アプリをインストールし、投稿先チャンネルに追加します。必要な権限は `commands` と `chat:write` です。
+3. **Google Apps Script**：`gas/Code.gs`、`gas/Payroll.gs`、`gas/appsscript.json` をプロジェクトに反映します。スクリプトプロパティに `GAS_SHARED_SECRET` と `HOURLY_RATE` を設定し、`setup()` を実行します。既存のスプレッドシートを使う場合は、先に `SPREADSHEET_ID` を設定してください。その後、本人権限で実行するウェブアプリとして公開します。
+4. **設定**：`.env` に以下の値を設定します。深夜設定を変える場合は、Apps Scriptのスクリプトプロパティにも同じ値を設定してください。
+5. **デプロイ**：`npx wrangler whoami` で対象アカウントを確認し、`npm run deploy` を実行します。Slackに設定したコマンドURLが実際のWorkerのURLと一致することを確認してください。
 
-1. `gas/Code.gs`・`gas/Payroll.gs`・`gas/appsscript.json` をApps Scriptプロジェクトに反映します。
-2. スクリプトプロパティに `GAS_SHARED_SECRET` と `HOURLY_RATE`（時給・円）を設定します。深夜設定を変更する場合は `NIGHT_START_HOUR`・`NIGHT_END_HOUR`・`NIGHT_MULTIPLIER` をWorkerと同じ値に設定します。`HOURLY_RATE` は月別給与シートを新しく作るときに使います。
-3. `setup()` を実行すると記録用シートを作成し、`SPREADSHEET_ID` を保存します。既存シートを使う場合は先にそのIDを設定してください。
-4. ウェブアプリとして本人権限で実行し、Workerから呼べるよう公開します。受信した本文の署名を検証するため、URLを知っているだけでは記録できません。
+### 環境変数
 
-### 既存環境へ深夜料金を反映する
+| 変数 | 内容 |
+| --- | --- |
+| `SLACK_SIGNING_SECRET` | SlackアプリのSigning Secret |
+| `SLACK_BOT_TOKEN` | SlackアプリのBotトークン |
+| `ALLOWED_TEAM_ID` | 利用を許可するワークスペースのID |
+| `ALLOWED_USER_ID` | 利用を許可する本人のユーザーID |
+| `POST_CHANNEL_ID` | 勤務・給与を投稿するチャンネルのID |
+| `MENTION_USER_ID` | 勤務開始・給与投稿時にメンションするユーザーのID |
+| `HOURLY_RATE` | 通常時給（円） |
+| `NIGHT_START_HOUR` | 深夜帯の開始時刻（0〜23、既定 `22`） |
+| `NIGHT_END_HOUR` | 深夜帯の終了時刻（0〜23、既定 `5`） |
+| `NIGHT_MULTIPLIER` | 深夜時給の倍率（既定 `1.25`） |
+| `GAS_URL` | Apps Scriptウェブアプリの `/exec` URL |
+| `GAS_SHARED_SECRET` | Apps Scriptと共有する署名用の鍵 |
 
-1. 先にApps Scriptへ更新した `gas/Code.gs` と `gas/Payroll.gs` を保存し、`setupPayroll()` を実行して既存月の給与式を更新します。公開済みウェブアプリを新バージョンへ更新します。
-2. Workerをデプロイします。最初の勤怠コマンド（または月初Cron）で、保存済み全勤務をSheetsへの転記待ちへ一度だけ追加します。給与の公開投稿は追加しません。
-3. 実働区間を元の記録IDの行へ追記し、深夜実働を再計算します。失敗時は既存の再試行を使います。転記待ちが解消した後、Slackの `/month` とSheetsの月別給与を照合してください。
-
-元の勤怠6列は保持し、実働区間と深夜実働は非表示のG・H列に追加します。月別・日別ビューは従来の4列表示を保ち、非表示E列を給与計算に使います。時刻不明の手動記録の深夜実働は0です。設定変更後は `setupPayroll()` を再実行して保存済み実働区間から深夜時間を再計算します。
-
-## 開発
-
-Node.js 22以降が必要です。
-
-```bash
-npm ci
-```
-
-```bash
-npm test
-```
-
-```bash
-npm run check
-```
+## 開発・デプロイ
 
 ```bash
-npm run dev
+npm test          # テスト
+npm run check     # デプロイのドライラン
+npm run dev       # ローカル開発
+npm run deploy    # .envの設定とともにデプロイ
 ```
-
-```bash
-npm run deploy
-```
-
-デプロイ前に `npx wrangler whoami` で対象アカウントを確認してください。
-
-### 自動デプロイ
-
-PRが `main` にマージされると、GitHub Actions（`.github/workflows/deploy.yml`）がテスト成功後に自動でCloudflare Workersへデプロイします。テスト失敗時はデプロイしません。Actions画面から手動実行も可能です。
-
-- リポジトリのシークレットに `CLOUDFLARE_API_TOKEN`（Workers編集権限のAPIトークン）と `CLOUDFLARE_ACCOUNT_ID` が必要です。
-- 自動デプロイでは `.env` を使わず、Cloudflareに登録済みの設定値をそのまま引き継ぎます。設定値を変えるときは、`.env` を更新して手元から `npm run deploy` を実行してください。
-- Apps Script（`gas/`）は自動デプロイの対象外で、手動で反映します。
-
-## 運用上の注意
-
-- Slackの再送はリクエストID、Sheetsへの転記は勤務IDで重複排除します。
-- 外部障害時にも終了記録はCloudflareに残ります。Sheetsへの反映待ちは週・月集計の応答に表示されます。
-- Cloudflareの保存状態やDurable Objectを削除すると勤務記録が失われるため、通常のデプロイでは削除しないでください。
-- 履歴が大きくなった場合は、集計の期間別インデックス化が必要です。
-- 記録の保存と投稿待ちの保存は同じトランザクションで行い、親投稿のSlack時刻を保存してから返信を送ります。
-- 投稿結果がネットワーク切断などで不明になった場合は `uncertain` 状態で止め、重複メンションを避けます。その場合は実際のスレッドを確認して投稿待ちを復旧してください。コマンド応答には投稿待ちがあることを表示します。
