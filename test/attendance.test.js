@@ -19,8 +19,9 @@ function session() {
 test('手順書の例：日またぎ、30分休憩、実働3時間', () => {
   const s = session();
   s.run('/start', '2026-09-27T23:30:00');
-  s.run('/break', '2026-09-28T01:00:00');
-  s.run('/resume', '2026-09-28T01:30:00');
+  s.run('/bi', '2026-09-28T01:00:00');
+  assert.match(s.run('/start', '2026-09-28T01:10:00').text, /\/bo/);
+  s.run('/bo', '2026-09-28T01:30:00');
   assert.match(s.run('/end', '2026-09-28T03:00:00').text, /実働：3時間$/);
   assert.deepEqual(sheetRow(s.state.records[0]), ['2026/09/27', '2026-09-27 23:30:00', '2026-09-28 03:00:00', 30, 180]);
   const now = at('2026-09-28T03:00:00');

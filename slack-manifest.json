@@ -16,13 +16,13 @@
         "should_escape": false
       },
       {
-        "command": "/break",
+        "command": "/bi",
         "url": "https://<your-worker>.<your-subdomain>.workers.dev/slack/commands",
         "description": "Start a break",
         "should_escape": false
       },
       {
-        "command": "/resume",
+        "command": "/bo",
         "url": "https://<your-worker>.<your-subdomain>.workers.dev/slack/commands",
         "description": "Resume work",
         "should_escape": false

@@ -1,7 +1,7 @@
 import { payrollTotals, nightSettings, nightDescription, exactDuration } from './payroll.js';
 // Pure attendance logic. The adapter must serialize commands and persist the
 // returned state before acknowledging success. All timestamps are epoch ms.
-export const COMMANDS = ['/start', '/break', '/resume', '/end', '/week', '/month'];
+export const COMMANDS = ['/start', '/bi', '/bo', '/break', '/resume', '/end', '/week', '/month'];
 const MINUTE = 60_000;
 const DAY = 86_400_000;
 const JST = 9 * 60 * MINUTE;
@@ -52,9 +52,10 @@ export function execute(state, { command, now, requestId }, { hourlyRate, night 
   switch (command) {
     case '/start':
       if (active?.status === 'working') return reply('すでに作業中です。');
-      if (active) return reply('現在休憩中です。/resume を使用してください。');
+      if (active) return reply('現在休憩中です。/bo を使用してください。');
       result.active = { id: requestId, startedAt: now, since: now, status: 'working', work: [] };
       return reply(`🟢 ${clock(now)} 作業を開始しました`);
+    case '/bi':
     case '/break':
       if (!active) return reply('作業が開始されていません。');
       if (active.status === 'break') return reply('すでに休憩中です。');
@@ -62,6 +63,7 @@ export function execute(state, { command, now, requestId }, { hourlyRate, night 
       active.since = now;
       active.status = 'break';
       return reply(`☕ ${clock(now)} 休憩を開始しました`);
+    case '/bo':
     case '/resume':
       if (active?.status !== 'break') return reply('現在休憩中ではありません。');
       active.status = 'working';

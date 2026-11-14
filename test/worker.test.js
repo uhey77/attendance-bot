@@ -81,7 +81,7 @@ test('再起動しても勤務状態と再送防止を保持する',async()=>{
   assert.ok(await f.storage.get('active'));
 });
 
-test('公開受付は署名・本人・6コマンドを検証してから保存処理を呼ぶ',async()=>{
+test('公開受付は署名・本人・コマンドを検証してから保存処理を呼ぶ',async()=>{
   let calls=0;
   const env={SLACK_SIGNING_SECRET:'secret',ALLOWED_USER_ID:'U1',ALLOWED_TEAM_ID:'T1',GAS_URL:'url',GAS_SHARED_SECRET:'key',SLACK_BOT_TOKEN:'test',POST_CHANNEL_ID:'C1',MENTION_USER_ID:'U2',HOURLY_RATE:'1000',ATTENDANCE:{idFromName:v=>v,get:()=>({fetch:async()=>{calls++;return Response.json({ok:true});}})}};
   function req(user='U1',command='/start',sign=true){
@@ -93,7 +93,10 @@ test('公開受付は署名・本人・6コマンドを検証してから保存�
   assert.match((await (await worker.fetch(req('U2'),env)).json()).text,/利用できません/);
   assert.match((await (await worker.fetch(req('U1','/today'),env)).json()).text,/不明/);
   assert.equal(calls,0);
-  assert.equal((await worker.fetch(req(),env)).status,200);assert.equal(calls,1);
+  for (const command of ['/start', '/bi', '/bo', '/break', '/resume']) {
+    assert.equal((await worker.fetch(req('U1',command),env)).status,200);
+  }
+  assert.equal(calls,5);
   assert.equal((await worker.fetch(req(),{})).status,503);
 });
 
@@ -104,7 +107,7 @@ test('勤務ごとに親投稿を作り、開始だけメンションし、返�
    if(String(url).includes('script.google.com'))return Response.json({ok:true});
    sent.push(JSON.parse(options.body));return Response.json({ok:true,ts:String(sent.length)+'.000001'});
  });
- for(const [i,c] of ['/start','/break','/resume','/end','/start'].entries())await f.command(c,String(i));
+ for(const [i,c] of ['/start','/bi','/bo','/end','/start'].entries())await f.command(c,String(i));
  await f.command('/start','4'); // exact retry
  for(let i=0;i<5;i++)await f.actor.alarm();
  assert.equal(sent.length,5);
