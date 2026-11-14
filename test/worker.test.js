@@ -19,14 +19,14 @@ function fixture() {
   const ctx={storage,blockConcurrencyWhile(fn){const next=serial.then(fn);serial=next.catch(()=>{});return next;}};
   const env={GAS_SHARED_SECRET:'test-only',GAS_URL:'https://script.google.com/macros/s/test/exec',HOURLY_RATE:'1000'};
   const actor=new AttendanceStore(ctx,env);
-  const command=(command,id)=>actor.fetch(new Request('https://internal/command',{method:'POST',body:JSON.stringify({command,requestId:id})})).then(r=>r.json());
+  const command=(command,id)=>actor.fetch(new Request('https://internal/command',{method:'POST',body:JSON.stringify({command,requestId:id})})).then(async r=>{const text=await r.text();return text ? JSON.parse(text) : null;});
   return {storage,actor,command};
 }
 
 test('同時開始を直列化し、終了の再送でも記録と反映待ちを重複させない',async()=>{
   const f=fixture();
   const [a,b]=await Promise.all([f.command('/start','1'),f.command('/start','2')]);
-  assert.match(a.text,/開始しました/); assert.match(b.text,/^すでに作業中です。/);
+  assert.equal(a,null); assert.match(b.text,/^すでに作業中です。/);
   const first=await f.command('/end','3');
   assert.deepEqual(await f.command('/end','3'),first);
   assert.equal((await f.storage.list({prefix:'record:'})).size,1);
@@ -77,8 +77,23 @@ test('再起動しても勤務状態と再送防止を保持する',async()=>{
   const f=fixture();await f.command('/start','a');
   const restarted=new AttendanceStore({storage:f.storage,blockConcurrencyWhile:fn=>fn()},{});
   const request=()=>new Request('https://internal/command',{method:'POST',body:JSON.stringify({command:'/start',requestId:'a'})});
-  assert.match((await (await restarted.fetch(request())).json()).text,/開始しました/);
+  assert.equal(await (await restarted.fetch(request())).text(),'');
   assert.ok(await f.storage.get('active'));
+});
+
+test('開始・休憩の成功と再送は無応答にし、状態エラーは表示する',async()=>{
+  for (const [startBreak,endBreak] of [['/bi','/bo'],['/break','/resume']]) {
+    const f=fixture();
+    assert.match((await f.command(startBreak,'before')).text,/開始されていません/);
+    for (const [command,id] of [['/start','start'],[startBreak,'break'],[endBreak,'resume']]) {
+      assert.equal(await f.command(command,id),null);
+      assert.equal(await f.command(command,id),null);
+    }
+    assert.match((await f.command(endBreak,'invalid')).text,/休憩中ではありません/);
+    assert.equal((await f.storage.list({prefix:'slack:'})).size,3);
+    assert.equal(f.storage.data.get('active').status,'working');
+    assert.match((await f.command('/end','end')).text,/終了しました/);
+  }
 });
 
 test('公開受付は署名・本人・コマンドを検証してから保存処理を呼ぶ',async()=>{
