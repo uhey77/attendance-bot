@@ -68,9 +68,9 @@ export class AttendanceStore {
     return this.ctx.blockConcurrencyWhile(async () => {
       const storage = this.ctx.storage;
       const now = Date.now();
-      const text = await storage.transaction(async tx => {
+      const response = await storage.transaction(async tx => {
         const cached = await tx.get(`request:${input.requestId}`);
-        if (cached) return cached.text;
+        if (cached) return cached;
         await this.enqueueNightBackfill(tx);
         const active = await tx.get('active') || null;
         const reporting = ['/week', '/month'].includes(input.command);
@@ -98,14 +98,16 @@ export class AttendanceStore {
         const pending = await tx.list({ prefix: 'outbox:', limit: 1 });
         if (reporting && pending.size) result.text += '\nGoogle Sheetsへの反映待ちがあります（集計には保存済みの終了分を含みます）。';
         if ((await tx.list({ prefix: 'slack:', limit: 1 })).size) result.text += '\n勤怠スレッドへの投稿待ちがあります。';
-        await tx.put(`request:${input.requestId}`, { text: result.text, expires: now + 600_000 });
+        const silent = changed && ['/start', '/bi', '/bo', '/break', '/resume'].includes(input.command);
+        const response = { text: result.text, silent, expires: now + 600_000 };
+        await tx.put(`request:${input.requestId}`, response);
         // Keep request deduplication bounded; Slack signatures expire in 5 minutes.
         for (const [key, value] of await tx.list({ prefix: 'request:' })) {
           if (value.expires < now) await tx.delete(key);
         }
-        return result.text;
+        return response;
       });
-      return json(text);
+      return response.silent ? new Response(null, { status: 200 }) : json(response.text);
     });
   }
 
