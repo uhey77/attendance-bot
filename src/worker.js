@@ -4,29 +4,52 @@ import { COMMANDS, execute, previousMonthPayroll, sheetRow } from './attendance.
 import { verifySlackRequest, authorizePayload } from './slack-auth.js';
 import { hourlyRate, nightSettings } from './payroll.js';
 
+const MAX_BODY_BYTES = 16_384;
+const REQUIRED_ENV = ['SLACK_SIGNING_SECRET', 'ALLOWED_USER_ID', 'ALLOWED_TEAM_ID', 'GAS_URL', 'GAS_SHARED_SECRET',
+  'SLACK_BOT_TOKEN', 'POST_CHANNEL_ID', 'MENTION_USER_ID', 'HOURLY_RATE'];
+
 const json = (text, status = 200) => Response.json({ response_type: 'ephemeral', text }, { status });
+
+// 利用者は1人なので、勤怠の保存先（Durable Object）も1つに固定する。
+const attendanceStub = env => env.ATTENDANCE.get(env.ATTENDANCE.idFromName(`${env.ALLOWED_TEAM_ID}:${env.ALLOWED_USER_ID}`));
+
+// Stream with a hard cap, including when Content-Length is absent.
+// 上限を超えた場合は null を返す。
+async function readBody(reader) {
+  const chunks = [];
+  let size = 0;
+  while (true) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    size += value.byteLength;
+    if (size > MAX_BODY_BYTES) { await reader.cancel(); return null; }
+    chunks.push(Buffer.from(value));
+  }
+  return Buffer.concat(chunks);
+}
+
+async function ensureAlarm(tx, time) {
+  if (!(await tx.getAlarm())) await tx.setAlarm(time);
+}
+
+// Slack投稿は連番キーで保存し、alarm が順番どおりに送信する。
+async function enqueueSlackPost(tx, event) {
+  const sequence = (await tx.get('postSequence') || 0) + 1;
+  await tx.put('postSequence', sequence);
+  await tx.put(`slack:${String(sequence).padStart(12, '0')}`, { ...event, clientId: randomUUID(), status: 'pending' });
+}
 
 export default {
   async fetch(request, env) {
     const path = new URL(request.url).pathname;
     if (path === '/health' && request.method === 'GET') return Response.json({ ok: true });
     if (path !== '/slack/commands' || request.method !== 'POST') return new Response('Not found', { status: 404 });
-    if (!env.SLACK_SIGNING_SECRET || !env.ALLOWED_USER_ID || !env.ALLOWED_TEAM_ID ||
-        !env.GAS_URL || !env.GAS_SHARED_SECRET || !env.SLACK_BOT_TOKEN || !env.POST_CHANNEL_ID || !env.MENTION_USER_ID || !env.HOURLY_RATE) return json('接続設定が完了していません。', 503);
+    if (REQUIRED_ENV.some(name => !env[name])) return json('接続設定が完了していません。', 503);
     if (!request.headers.get('content-type')?.startsWith('application/x-www-form-urlencoded')) return new Response(null, { status: 415 });
-    // Stream with a hard cap, including when Content-Length is absent.
     const reader = request.body?.getReader();
     if (!reader) return new Response(null, { status: 400 });
-    const chunks = [];
-    let size = 0;
-    while (true) {
-      const { value, done } = await reader.read();
-      if (done) break;
-      size += value.byteLength;
-      if (size > 16_384) { await reader.cancel(); return new Response(null, { status: 413 }); }
-      chunks.push(Buffer.from(value));
-    }
-    const rawBody = Buffer.concat(chunks);
+    const rawBody = await readBody(reader);
+    if (!rawBody) return new Response(null, { status: 413 });
     if (!verifySlackRequest({ rawBody, timestamp: request.headers.get('x-slack-request-timestamp'),
       signature: request.headers.get('x-slack-signature'), signingSecret: env.SLACK_SIGNING_SECRET })) {
       return new Response('Unauthorized', { status: 401 });
@@ -35,8 +58,7 @@ export default {
     if (!input) return json('このコマンドは利用できません。');
     if (!COMMANDS.includes(input.command)) return json('不明なコマンドです。');
     try {
-      const id = env.ATTENDANCE.idFromName(`${env.ALLOWED_TEAM_ID}:${env.ALLOWED_USER_ID}`);
-      return await env.ATTENDANCE.get(id).fetch(new Request('https://internal/command', {
+      return await attendanceStub(env).fetch(new Request('https://internal/command', {
         method: 'POST', body: JSON.stringify(input)
       }));
     } catch {
@@ -49,8 +71,7 @@ export default {
   // 毎月1日に前月分の給与をメンション付きで投稿する（Cron Trigger）。
   async scheduled(controller, env) {
     if (!env.ALLOWED_USER_ID || !env.ALLOWED_TEAM_ID || !env.HOURLY_RATE) throw new Error('Missing attendance config');
-    const id = env.ATTENDANCE.idFromName(`${env.ALLOWED_TEAM_ID}:${env.ALLOWED_USER_ID}`);
-    const response = await env.ATTENDANCE.get(id).fetch(new Request('https://internal/monthly-payroll', {
+    const response = await attendanceStub(env).fetch(new Request('https://internal/monthly-payroll', {
       method: 'POST', body: JSON.stringify({ now: controller.scheduledTime })
     }));
     if (!response.ok) throw new Error('Monthly payroll enqueue failed');
@@ -78,13 +99,10 @@ export class AttendanceStore {
         const result = execute({ active, records }, { ...input, now }, { hourlyRate: hourlyRate(this.env), night: nightSettings(this.env) });
         const changed = JSON.stringify(active) !== JSON.stringify(result.state.active);
         if (changed) {
-          const sequence = (await tx.get('postSequence') || 0) + 1;
-          await tx.put('postSequence', sequence);
-          await tx.put(`slack:${String(sequence).padStart(12, '0')}`, {
-            sessionId: active?.id || result.state.active.id,
-            command: input.command, text: result.text, clientId: randomUUID(), status: 'pending'
+          await enqueueSlackPost(tx, {
+            sessionId: active?.id || result.state.active.id, command: input.command, text: result.text
           });
-          if (!(await tx.getAlarm())) await tx.setAlarm(now + 1000);
+          await ensureAlarm(tx, now + 1000);
         }
         await tx.put('active', result.state.active);
         if (input.command === '/end' && active) {
@@ -92,7 +110,7 @@ export class AttendanceStore {
           await tx.put(`record:${record.id}`, record);
           await tx.put(`outbox:${record.id}`, record);
           // Alarm and record are committed atomically; a crash cannot lose sync.
-          if (!(await tx.getAlarm())) await tx.setAlarm(now + 1000);
+          await ensureAlarm(tx, now + 1000);
           result.text += '\n記録を保存しました。Google Sheetsへ順次反映します。';
         }
         const pending = await tx.list({ prefix: 'outbox:', limit: 1 });
@@ -120,12 +138,8 @@ export class AttendanceStore {
         // Cronの重複起動でも同じ月の投稿は一度だけにする。
         if (await tx.get(`payrollReport:${report.key}`)) return;
         await tx.put(`payrollReport:${report.key}`, true);
-        const sequence = (await tx.get('postSequence') || 0) + 1;
-        await tx.put('postSequence', sequence);
-        await tx.put(`slack:${String(sequence).padStart(12, '0')}`, {
-          command: 'payroll', text: report.text, clientId: randomUUID(), status: 'pending'
-        });
-        if (!(await tx.getAlarm())) await tx.setAlarm(Date.now() + 1000);
+        await enqueueSlackPost(tx, { command: 'payroll', text: report.text });
+        await ensureAlarm(tx, Date.now() + 1000);
       });
       return Response.json({ ok: true });
     });
@@ -138,17 +152,33 @@ export class AttendanceStore {
       await tx.put(`outbox:${record.id}`, record);
     }
     await tx.put('nightBackfill:v1', true);
-    if ((await tx.list({ prefix: 'outbox:', limit: 1 })).size && !(await tx.getAlarm())) {
-      await tx.setAlarm(Date.now() + 1000);
-    }
+    if ((await tx.list({ prefix: 'outbox:', limit: 1 })).size) await ensureAlarm(tx, Date.now() + 1000);
   }
 
   async alarm() {
     const storage = this.ctx.storage;
     // Schedule recovery before doing network work, including process termination.
     await storage.setAlarm(Date.now() + 60_000);
+    // Sheets転記が失敗しても、Slack投稿は続けて試みる。
+    const synced = await this.syncSheets(storage);
+    const posted = await this.postNextSlackEvent(storage);
+    const failed = !synced || !posted;
+    // Coordinate with incoming /end so we never clear its newly scheduled alarm.
+    await this.ctx.blockConcurrencyWhile(async () => {
+      if ((await storage.list({ prefix: 'outbox:', limit: 1 })).size || (await storage.list({ prefix: 'slack:', limit: 1 })).size) {
+        const attempts = failed ? (await storage.get('syncFailures') || 0) + 1 : 0;
+        await storage.put('syncFailures', attempts);
+        await storage.setAlarm(Date.now() + (failed ? Math.min(3_600_000, 30_000 * 2 ** Math.min(attempts, 7)) : 1000));
+      } else {
+        await storage.delete('syncFailures');
+        await storage.deleteAlarm();
+      }
+    });
+  }
+
+  // 保存済みの勤務記録をGoogle Sheetsへ転記する。失敗したら false を返し、記録は再試行用に残す。
+  async syncSheets(storage) {
     const pending = await storage.list({ prefix: 'outbox:', limit: 10 });
-    let failed = false;
     for (const [key, record] of pending) {
       try {
         const payload = JSON.stringify({ id: record.id, row: sheetRow(record), work: record.kind === 'manual' ? [] : record.work });
@@ -162,15 +192,19 @@ export class AttendanceStore {
         if (!response.ok || (await response.json()).ok !== true) throw new Error('Sync rejected');
         await storage.delete(key);
       } catch {
-        failed = true;
         console.error('Sheets sync failed; saved record retained for retry');
-        break;
+        return false;
       }
     }
+    return true;
+  }
+
+  // 投稿待ちの先頭1件をSlackへ送る。再試行が必要な場合は false を返す。
+  async postNextSlackEvent(storage) {
     // Publish in sequence so replies never precede the root post.
     const posts = await storage.list({ prefix: 'slack:', limit: 10 });
     for (const [key, event] of posts) {
-      if (event.status === 'uncertain') { failed = true; break; }
+      if (event.status === 'uncertain') return false;
       try {
         // 給与の月次投稿は勤務スレッドに属さない独立した親投稿にする。
         const standalone = event.command === 'payroll';
@@ -189,7 +223,7 @@ export class AttendanceStore {
           signal: AbortSignal.timeout(10_000)
         });
         if (response.status === 429) {
-          await storage.put(key, event); failed = true; break;
+          await storage.put(key, event); return false;
         }
         const data = await response.json();
         if (!data.ok) {
@@ -201,23 +235,12 @@ export class AttendanceStore {
           await tx.delete(key);
         });
         // Respect Slack's per-channel message rate. Next event gets its own alarm.
-        break;
+        return true;
       } catch {
-        failed = true;
         console.error('Slack post pending; ambiguous deliveries require inspection before retry');
-        break;
+        return false;
       }
     }
-    // Coordinate with incoming /end so we never clear its newly scheduled alarm.
-    await this.ctx.blockConcurrencyWhile(async () => {
-      if ((await storage.list({ prefix: 'outbox:', limit: 1 })).size || (await storage.list({ prefix: 'slack:', limit: 1 })).size) {
-        const attempts = failed ? (await storage.get('syncFailures') || 0) + 1 : 0;
-        await storage.put('syncFailures', attempts);
-        await storage.setAlarm(Date.now() + (failed ? Math.min(3_600_000, 30_000 * 2 ** Math.min(attempts, 7)) : 1000));
-      } else {
-        await storage.delete('syncFailures');
-        await storage.deleteAlarm();
-      }
-    });
+    return true;
   }
 }

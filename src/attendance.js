@@ -29,6 +29,16 @@ export function periodStart(command, now) {
   throw new Error('Unknown reporting period');
 }
 
+// 記録が属する日時。手動記録は勤務日（日本時間の0時）、通常記録は開始時刻。
+function recordTime(record) {
+  return record.kind === 'manual' ? Date.parse(record.workDate + 'T00:00:00+09:00') : record.startedAt;
+}
+
+function monthLabel(time) {
+  const date = new Date(time + JST);
+  return `${date.getUTCFullYear()}年${date.getUTCMonth() + 1}月`;
+}
+
 export function workMilliseconds(record) {
   if (record.kind === 'manual') return record.durationMs;
   return record.work.reduce((sum, [start, end]) => sum + end - start, 0);
@@ -36,10 +46,10 @@ export function workMilliseconds(record) {
 
 export function summarize(state, command, now) {
   const start = periodStart(command, now);
-  return state.records.reduce((sum, record) => sum + (
-    (record.kind === 'manual' ? Date.parse(record.workDate + 'T00:00:00+09:00') : record.startedAt) >= start &&
-    (record.kind === 'manual' ? Date.parse(record.workDate + 'T00:00:00+09:00') : record.startedAt) <= now ? workMilliseconds(record) : 0
-  ), 0);
+  return state.records.reduce((sum, record) => {
+    const time = recordTime(record);
+    return sum + (time >= start && time <= now ? workMilliseconds(record) : 0);
+  }, 0);
 }
 
 export function execute(state, { command, now, requestId }, { hourlyRate, night = nightSettings() } = {}) {
@@ -82,14 +92,12 @@ export function execute(state, { command, now, requestId }, { hourlyRate, night 
       const label = { '/week': '今週', '/month': '今月' }[command];
       if (command === '/month') {
         const start = periodStart(command, now);
-        const eligible = result.records.filter(r => {
-          const date = r.kind === 'manual' ? Date.parse(r.workDate + 'T00:00:00+09:00') : r.startedAt;
-          return date >= start && date <= now;
+        const eligible = result.records.filter(record => {
+          const time = recordTime(record);
+          return time >= start && time <= now;
         });
         const { duration, nightDuration, amount } = payrollTotals(eligible, hourlyRate, night);
-        const date = new Date(now + JST);
-        const month = `${date.getUTCFullYear()}年${date.getUTCMonth() + 1}月`;
-        return reply(`📊 ${month}の給与対象実働：${exactDuration(duration)}${nightDescription(nightDuration, night)}\n時給：${hourlyRate.toLocaleString('ja-JP')}円\n今月の合計給与：${amount.toLocaleString('ja-JP')}円`);
+        return reply(`📊 ${monthLabel(now)}の給与対象実働：${exactDuration(duration)}${nightDescription(nightDuration, night)}\n時給：${hourlyRate.toLocaleString('ja-JP')}円\n今月の合計給与：${amount.toLocaleString('ja-JP')}円`);
       }
       return reply(`📊 ${label}の実働：${formatDuration(summarize(result, command, now))}`);
     }
@@ -112,12 +120,11 @@ export function previousMonthPayroll(records, now, hourlyRate, night = nightSett
   const start = Date.UTC(year, month - 1, 1) - JST;
   const end = Date.UTC(year, month, 1) - JST;
   const eligible = records.filter(record => {
-    const startedAt = record.kind === 'manual' ? Date.parse(record.workDate + 'T00:00:00+09:00') : record.startedAt;
-    return startedAt >= start && startedAt < end;
+    const time = recordTime(record);
+    return time >= start && time < end;
   });
   const { duration, nightDuration, amount } = payrollTotals(eligible, hourlyRate, night);
   const target = new Date(start + JST);
   const key = `${target.getUTCFullYear()}-${String(target.getUTCMonth() + 1).padStart(2, '0')}`;
-  const label = `${target.getUTCFullYear()}年${target.getUTCMonth() + 1}月`;
-  return { key, duration, nightDuration, amount, text: `💴 ${label}分の給与\n給与対象実働：${exactDuration(duration)}${nightDescription(nightDuration, night)}\n時給：${hourlyRate.toLocaleString('ja-JP')}円\n合計給与：${amount.toLocaleString('ja-JP')}円` };
+  return { key, duration, nightDuration, amount, text: `💴 ${monthLabel(start)}分の給与\n給与対象実働：${exactDuration(duration)}${nightDescription(nightDuration, night)}\n時給：${hourlyRate.toLocaleString('ja-JP')}円\n合計給与：${amount.toLocaleString('ja-JP')}円` };
 }
